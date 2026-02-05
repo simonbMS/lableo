@@ -7,9 +7,18 @@ param vmName string
 @description('The admin username for the VM.')
 param adminUsername string
 
-@description('The admin password for the VM.')
+@description('The admin password for the VM. Ignored if adminPasswordKeyVaultSecretName is specified.')
 @secure()
-param adminPassword string
+param adminPassword string = ''
+
+@description('The name of the Key Vault containing the admin password secret. Defaults to keyVaultName if not specified.')
+param adminPasswordKeyVaultName string = ''
+
+@description('The resource group of the Key Vault containing the admin password secret. Defaults to keyVaultResourceGroup if not specified.')
+param adminPasswordKeyVaultResourceGroup string = ''
+
+@description('The name of the secret in Key Vault containing the admin password. If specified, this takes precedence over adminPassword.')
+param adminPasswordKeyVaultSecretName string = ''
 
 @description('Tags to apply to all resources.')
 param tags object = {}
@@ -64,6 +73,19 @@ resource existingKeyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
 resource existingKey 'Microsoft.KeyVault/vaults/keys@2023-07-01' existing = {
   parent: existingKeyVault
   name: diskEncryptionKeyName
+}
+
+// Key Vault for admin password (may be same as disk encryption Key Vault or different)
+var passwordKeyVaultName = !empty(adminPasswordKeyVaultSecretName) 
+  ? (!empty(adminPasswordKeyVaultName) ? adminPasswordKeyVaultName : keyVaultName)
+  : ''
+var passwordKeyVaultResourceGroup = !empty(adminPasswordKeyVaultSecretName)
+  ? (!empty(adminPasswordKeyVaultResourceGroup) ? adminPasswordKeyVaultResourceGroup : keyVaultResourceGroup)
+  : ''
+
+resource passwordKeyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = if (!empty(adminPasswordKeyVaultSecretName)) {
+  name: passwordKeyVaultName
+  scope: resourceGroup(passwordKeyVaultResourceGroup)
 }
 
 // ============================================================================
@@ -126,92 +148,42 @@ resource diskEncryptionSet 'Microsoft.Compute/diskEncryptionSets@2023-10-02' = {
 }
 
 // ============================================================================
-// Network Interface
+// Confidential Virtual Machine (using Key Vault password)
 // ============================================================================
-resource networkInterface 'Microsoft.Network/networkInterfaces@2024-01-01' = {
-  name: 'nic-${vmName}'
-  location: location
-  tags: tags
-  properties: {
-    ipConfigurations: [
-      {
-        name: 'ipconfig1'
-        properties: {
-          privateIPAllocationMethod: 'Dynamic'
-          subnet: {
-            id: existingSubnet.id
-          }
-        }
-      }
-    ]
+module vmWithKeyVaultPassword 'modules/confidential-vm.bicep' = if (!empty(adminPasswordKeyVaultSecretName)) {
+  name: 'deploy-${vmName}-kv'
+  params: {
+    location: location
+    vmName: vmName
+    adminUsername: adminUsername
+    adminPassword: passwordKeyVault.getSecret(adminPasswordKeyVaultSecretName)
+    tags: tags
+    vmSize: vmSize
+    imageReference: imageReference
+    subnetId: existingSubnet.id
+    diskEncryptionSetId: diskEncryptionSet.id
   }
+  dependsOn: [
+    desKeyVaultRoleAssignment
+    cvmOrchestratorRoleAssignment
+  ]
 }
 
 // ============================================================================
-// Confidential Virtual Machine
+// Confidential Virtual Machine (using plain text password)
 // ============================================================================
-resource virtualMachine 'Microsoft.Compute/virtualMachines@2025-04-01' = {
-  name: vmName
-  location: location
-  tags: tags
-  properties: {
-    hardwareProfile: {
-      vmSize: vmSize
-    }
-    osProfile: {
-      computerName: vmName
-      adminUsername: adminUsername
-      adminPassword: adminPassword
-      windowsConfiguration: {
-        provisionVMAgent: true
-        enableAutomaticUpdates: true
-        patchSettings: {
-          patchMode: 'AutomaticByOS'
-          assessmentMode: 'ImageDefault'
-        }
-      }
-    }
-    storageProfile: {
-      imageReference: imageReference
-      osDisk: {
-        name: 'osdisk-${vmName}'
-        createOption: 'FromImage'
-        caching: 'ReadWrite'
-        managedDisk: {
-          storageAccountType: 'Premium_LRS'
-          securityProfile: {
-            securityEncryptionType: 'DiskWithVMGuestState'
-            diskEncryptionSet: {
-              id: diskEncryptionSet.id
-            }
-          }
-        }
-        deleteOption: 'Delete'
-      }
-      dataDisks: []
-    }
-    networkProfile: {
-      networkInterfaces: [
-        {
-          id: networkInterface.id
-          properties: {
-            deleteOption: 'Delete'
-          }
-        }
-      ]
-    }
-    securityProfile: {
-      securityType: 'ConfidentialVM'
-      uefiSettings: {
-        secureBootEnabled: true
-        vTpmEnabled: true
-      }
-    }
-    diagnosticsProfile: {
-      bootDiagnostics: {
-        enabled: true
-      }
-    }
+module vmWithPlainPassword 'modules/confidential-vm.bicep' = if (empty(adminPasswordKeyVaultSecretName)) {
+  name: 'deploy-${vmName}-plain'
+  params: {
+    location: location
+    vmName: vmName
+    adminUsername: adminUsername
+    adminPassword: adminPassword
+    tags: tags
+    vmSize: vmSize
+    imageReference: imageReference
+    subnetId: existingSubnet.id
+    diskEncryptionSetId: diskEncryptionSet.id
   }
   dependsOn: [
     desKeyVaultRoleAssignment
@@ -223,13 +195,13 @@ resource virtualMachine 'Microsoft.Compute/virtualMachines@2025-04-01' = {
 // Outputs
 // ============================================================================
 @description('The resource ID of the virtual machine.')
-output vmId string = virtualMachine.id
+output vmId string = !empty(adminPasswordKeyVaultSecretName) ? vmWithKeyVaultPassword.outputs.vmId : vmWithPlainPassword.outputs.vmId
 
 @description('The name of the virtual machine.')
-output vmName string = virtualMachine.name
+output vmName string = !empty(adminPasswordKeyVaultSecretName) ? vmWithKeyVaultPassword.outputs.vmName : vmWithPlainPassword.outputs.vmName
 
 @description('The private IP address of the VM.')
-output privateIpAddress string = networkInterface.properties.ipConfigurations[0].properties.privateIPAddress
+output privateIpAddress string = !empty(adminPasswordKeyVaultSecretName) ? vmWithKeyVaultPassword.outputs.privateIpAddress : vmWithPlainPassword.outputs.privateIpAddress
 
 @description('The resource ID of the Disk Encryption Set.')
 output diskEncryptionSetId string = diskEncryptionSet.id
