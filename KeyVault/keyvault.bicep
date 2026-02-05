@@ -43,10 +43,10 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enabledForDiskEncryption: true
     enabledForDeployment: true
     enabledForTemplateDeployment: true
-    // Soft delete and purge protection for production security
-    enableSoftDelete: true
-    softDeleteRetentionInDays: softDeleteRetentionInDays
-    enablePurgeProtection: true
+    // Soft delete enabled, purge protection disabled for dev/test flexibility
+    enableSoftDelete: false
+//    softDeleteRetentionInDays: softDeleteRetentionInDays
+    enablePurgeProtection: false
     // Disable public network access - only accessible via private endpoint
     publicNetworkAccess: 'Disabled'
     // Network ACLs - deny all public access, allow Azure services bypass
